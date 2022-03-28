@@ -8,14 +8,14 @@ PROCESSOR 16F887
 ; CONFIG1
   CONFIG  FOSC = INTRC_NOCLKOUT ; Oscillator Selection bits (INTOSCIO oscillator: I/O function on RA6/OSC2/CLKOUT pin, I/O function on RA7/OSC1/CLKIN)
   CONFIG  WDTE = OFF            ; Watchdog Timer Enable bit (WDT disabled and can be enabled by SWDTEN bit of the WDTCON register)
-  CONFIG  PWRTE = ON            ; Power-up Timer Enable bit (PWRT enabled)
+  CONFIG  PWRTE = OFF            ; Power-up Timer Enable bit (PWRT enabled)
   CONFIG  MCLRE = OFF           ; RE3/MCLR pin function select bit (RE3/MCLR pin function is digital input, MCLR internally tied to VDD)
   CONFIG  CP = OFF              ; Code Protection bit (Program memory code protection is disabled)
   CONFIG  CPD = OFF             ; Data Code Protection bit (Data memory code protection is disabled)
   CONFIG  BOREN = OFF           ; Brown Out Reset Selection bits (BOR disabled)
   CONFIG  IESO = OFF            ; Internal External Switchover bit (Internal/External Switchover mode is disabled)
   CONFIG  FCMEN = OFF           ; Fail-Safe Clock Monitor Enabled bit (Fail-Safe Clock Monitor is disabled)
-  CONFIG  LVP = ON              ; Low Voltage Programming Enable bit (RB3/PGM pin has PGM function, low voltage programming enabled)
+  CONFIG  LVP = OFF              ; Low Voltage Programming Enable bit (RB3/PGM pin has PGM function, low voltage programming enabled)
 
 ; CONFIG2
   CONFIG  BOR4V = BOR40V        ; Brown-out Reset Selection bit (Brown-out Reset set to 4.0V)
@@ -25,35 +25,51 @@ PROCESSOR 16F887
 #include <xc.inc>
   
 ; -------------- MACROS --------------- 
-; Macro para reiniciar el valor del TMR0
-RESET_TMR0 MACRO TMR_VAR
-    BANKSEL TMR0	    ; cambiamos de banco
-    MOVLW   TMR_VAR
-    MOVWF   TMR0	    ; configuramos tiempo de retardo
-    BCF	    T0IF	    ; limpiamos bandera de interrupción
+    
+COMPARADOR  MACRO VAR1, CONST
+    MOVLW CONST
+    SUBWF VAR1, 0
+    BTFSS STATUS, 0
+    RETURN
+    ENDM
+    
+VALORES_DISP MACRO VAR1, VAR2, VAR3, VAR4
+    MOVF VAR1, 0
+    MOVWF DIS1
+    MOVF VAR2, 0
+    MOVWF DIS2
+    MOVF VAR3, 0
+    MOVWF DIS3
+    MOVF VAR4, 0
+    MOVWF DIS4
     ENDM
   
+    
 PSECT udata_shr			 ; Memoria compartida
     W_TEMP:		DS 1
     STATUS_TEMP:	DS 1
-    msegundos:		DS 1	; Contador TMR0
-    segundos:		DS 1	; Contador segundos
-    minutos1:		DS 1	; Contador unidades de minuto
-    minutos2:		DS 1	; Contador decenas de minuto
-    horas1:		DS 1	; Contador unidades de horas
-    horas2:		DS 1	; Contador decenas de minuto
-    banderas:		DS 1	; Banderas para mostrar valores en displays
-    M1:			DS 1	; Unidades de minutos con valor de tabla de 7 seg
-    M2:			DS 1	; Decenas de minutos con valor de tabla de 7 seg
-    H1:			DS 1	; Unidades de horas con valor de tabla de 7 seg
-    H2:			DS 1	; Decenas de horas con valor de tabla de 7 seg
-    valor:		DS 1	; Contador para edición manual de reloj
-    cantidad:		DS 1	; Contador 2 para edición manual de reloj
-    ECHECK:		DS 1	; Registro de chequeo para estados (tmr0)
+    FLAGS:		DS 1
+    MIN_U:		DS 1
+    HORA_U:		DS 1
+    MIN_D:		DS 1
+    HORA_D:		DS 1
+    DIA_D:		DS 1
+    DELAY1:		DS 1
+    DELAY2:		DS 1
     
 PSECT udata_bank0
-    ECHECKL:		DS 1	; Registro de chequeo para estados (loop)
-    ECHECKB:		DS 1	; Registro de chequeo para estados (botón)
+    MES_D:		DS 1
+    horas:		DS 1
+    mins:		DS 2
+    DIS1:		DS 1
+    DIS2:		DS 1
+    DIS3:		DS 1
+    DIS4:		DS 1
+    EXTRA:		DS 1
+    LUCES:		DS 1
+    SEGS:		DS 1
+    banderas:		DS 1
+    FLAGE0:		DS 1
      
 PSECT resVect, class = CODE, abs, delta = 2
 ; -------------------- VECTOR RESET -----------------------
@@ -72,10 +88,14 @@ PUSH:
     MOVWF   STATUS_TEMP	    ; Guardamos STATUS
     
 ISR:  
-    BTFSC   RBIF		; Fue interrupción del PORTB? No=0 Si=1
-    CALL    INT_IOCB		; Si -> Subrutina de interrupción de PORTB
-    BTFSC   T0IF		; Fue interrupción del TMR0? No=0 Si=1
-    CALL    INT_TMR0		; Si -> Subrutina de interrupción de TMR0
+    BTFSC   T0IF
+    CALL    INT_TMR0
+    BTFSC   TMR1IF
+    CALL    INT_TMR1
+    BTFSC   TMR2IF
+    CALL    INT_TMR2
+    BTFSC   RBIF		; Fue interrupci?n del PORTB? No=0 Si=1
+    CALL    INT_IOCB
     
 POP:
     SWAPF   STATUS_TEMP, W
@@ -84,102 +104,387 @@ POP:
     SWAPF   W_TEMP, W
     RETFIE
 
-;---------------------subrutinas de int--------------------    
-
-INT_IOCB:
-    BANKSEL PORTA
-    BTFSS   PORTA, 1
-    GOTO    ESTADO_1
-    
-    ESTADO_0:
-	BTFSC   PORTB, 0	; Primer botón (estado)
-	GOTO	$+2
-	BCF	PORTA, 1
-	
-
-	BTFSC   PORTB, 1	; Botón incremento
-	GOTO    $+2
-	INCF    valor	; Incremento de contador
-
-	BTFSC   PORTB, 2	; Botón decremento
-	GOTO    $+2
-	DECF    valor	; Decremento de contador
-
-	BTFSC   ECHECKB, 0
-	GOTO    BE1
-
-	BE0:
-	    BTFSC   PORTB, 3	; Inicia conteo de reloj automático
-	    GOTO    $+5
-	    BSF	    ECHECK,  0	; Configuraciones para ir al estado correspondiente
-	    BSF	    ECHECKL, 0
-	    BSF	    ECHECKB, 0
-	    BCF	    PORTA,   0	; LED de configuración
-	    BCF	    RBIF
-	    RETURN
-
-	BE1:
-	    BTFSC   PORTB, 3	; Para conteo de reloj automático
-	    GOTO    $+6
-	    BCF	    ECHECK,  0	; Configuraciones para ir al estado correspondiente
-	    BCF	    ECHECKL, 0
-	    BCF	    ECHECKB, 0
-	    BSF	    PORTA,   0	; LED de configuración
-	    CLRF	    valor
-	    BCF	    RBIF
-	    RETURN
-
-    ESTADO_1:
-    
+;---------------------subrutinas de int--------------------   
+INT_TMR0: ;2ms
+    BANKSEL TMR0
+    MOVLW 131
+    MOVWF TMR0
+    BCF T0IF
+    CALL CUAL_DISP
     RETURN
     
+INT_TMR1: ;1s
+    BANKSEL TMR1H
+    MOVLW 00001011B
+    MOVWF TMR1H 
+    MOVLW 11011100B
+    MOVWF TMR1L
+    BCF TMR1IF
+    INCF SEGS ;CONTROLA HORA
+    RETURN
     
-INT_TMR0:
-    BTFSC   ECHECK, 0		; Verificamos en que estado estamos 
-    GOTO    E01
+INT_TMR2: ;0.5s
+    BCF TMR2IF
+    INCF LUCES
+    CALL INTERMITENTES
+    CLRF TMR2
+    RETURN
     
-    E00:			; Estado de configuración manual de reloj
-	RESET_TMR0 255		; Reset del TMR0	2ms
-	CALL    MOSTRAR_VALOR	; Mostramos valor en los displays
-	RETURN
+INT_IOCB:
+    BANKSEL PORTA
+    BTFSC   PORTA, 1
+    GOTO    ESTADO_0
+    ;BTFSC   PORTA, 2
+    ;GOTO    ESTADO_1
+    ;BTFSC   PORTA, 3
+    ;GOTO    ESTADO_2
+    ;GOTO    $-3
+    
+    ESTADO_0:
+	BTFSC   PORTB, 7	; BOTON ESTADO
+	GOTO	$+4
+	BCF	PORTA, 1
+	BSF	PORTA, 2
+	BCF	RBIF
 	
-    E01:			; Estado de funcionamiento automático de reloj
-	RESET_TMR0 255		; Reset del TMR0	2ms
-	CALL    COUNTER		; Contadores
-	CALL    MOSTRAR_VALOR	; Mostramos valor en los displays
-	RETURN
+	BTFSS PORTB, 3
+	BSF	FLAGE0, 1
+	
+	BANKSEL FLAGE0
+	BTFSC	FLAGE0, 1
+	GOTO	RELOJA
+	BTFSC	FLAGE0, 3
+	GOTO	EDIT_MINS
+	GOTO	EDIT_HORAS
+	
+	RELOJA:
+	    BTFSC FLAGE0, 2	;BANDERA PARA INICIAR/PARAR RELOJ
+	    GOTO  STOP
 
+	    START:
+	    BSF	  FLAGE0, 0
+	    BSF	  FLAGE0, 2
+	    BCF	  PORTD, 0
+	    BCF	  RBIF
+	    RETURN
+
+	    STOP:
+	    BTFSS PORTB, 3
+	    CLRF  FLAGE0
+	    BCF	  RBIF
+	    RETURN
+	
+	EDIT_HORAS:
+	    BSF	    PORTD, 0
+	    BTFSS PORTB, 4
+	    BSF FLAGE0, 3
+	    BTFSS PORTB, 6
+	    INCF horas
+	    BTFSS PORTB, 5
+	    DECF horas
+
+	    MOVF horas, W       
+	    XORLW 24           ; se compara si horas llegó a 24
+	    BTFSC STATUS, 2
+	    CLRF horas
+	    MOVF horas, W
+	    XORLW 255 
+	    BTFSS STATUS, 2
+	    GOTO  $+3
+	    MOVLW 23
+	    MOVWF horas
+	    CALL HORAS_A_DISP
+	    BCF RBIF
+	    RETURN
+
+	
+	EDIT_MINS:
+	    BSF	  PORTD, 0
+	    BTFSS PORTB, 4
+	    BCF	  FLAGE0, 3 
+	    BTFSS PORTB, 6
+	    INCF  mins
+	    BTFSS PORTB, 5
+	    DECF  mins
+
+	    MOVF mins, W       
+	    XORLW 60           ; se compara si minutos llegó a 60
+	    BTFSC STATUS, 2
+	    CLRF mins
+	    MOVF mins, W
+	    XORLW 255      
+	    BTFSS STATUS, 2
+	    GOTO $+3
+	    MOVLW 59
+	    MOVWF mins
+	    CALL MINUTOS_A_DISP
+	    BCF RBIF
+	    RETURN
+	  
+	
+	
+	
 PSECT code, delta = 2, abs
  
-; -------------------- CONFIGURATION ---------------------
+; -------------------- MAIN PROG ---------------------
 ORG 100h
 main:
     CALL CONFIG_IO	; Configuraciones para que el programa funcione correctamente
     CALL CONFIG_RELOJ
-    CALL CONFIG_IOCB
     CALL CONFIG_INT
     CALL CONFIG_TMR0
-    CLRF msegundos	; Asegurando que msegundos y valor empiecen en 0
-    CLRF    valor
-    BSF	    PORTA, 1
-    BANKSEL PORTA
-        
-LOOP:					; Verificamos en que estado estamos 
-    BTFSC   ECHECKL, 0
-    GOTO    E03
+    CALL CONFIG_TMR1
+    CALL CONFIG_TMR2
+    CALL LIMPIAR
+    BSF	 PORTA, 1	;LED ESTADO RELOJ
     
-    E02:				; Estado de configuración manual de reloj
-	MOVF    valor, W		
-	MOVWF   cantidad
-	CALL    COUNTER_CONFIG
-	CALL    SET_DISPLAY
+LOOP:
+    BTFSC   PORTA, 1
+    GOTO    ESTADO0
+    
+    ESTADO0:
+	BTFSC   FLAGE0, 0
+	GOTO    AUTO
+    
+    AJUSTE:
+	VALORES_DISP HORA_D, HORA_U, MIN_D, MIN_U
+	GOTO    LOOP
+    
+    AUTO:
+	CALL    RELOJ
+	VALORES_DISP HORA_D, HORA_U, MIN_D, MIN_U
 	GOTO    LOOP
 	
-    E03:				; Estado de funcionamiento automático de reloj
-	CALL    SET_DISPLAY
-	GOTO    LOOP
     
-; ----------------------subrutinas------------------------
+    
+;-------------------------------subrutinas del programa----------------------------
+    
+ RELOJ:
+    COMPARADOR SEGS, 60 ;60
+    CLRF SEGS
+    INCF MIN_U
+    INCF EXTRA
+    COMPARADOR MIN_U, 10 ;10
+    CLRF MIN_U
+    INCF MIN_D
+    COMPARADOR MIN_D, 6	   ;6
+    CLRF MIN_D
+    INCF HORA_U
+    COMPARADOR HORA_U, 10
+    CLRF HORA_U
+    INCF HORA_D
+    RETURN 
+    
+CUAL_DISP: ;LE METE LOS DIFERENTES VALORES A LOS DISPLAYS
+    BCF	    PORTA, 4		; Apagamos display 
+    BCF	    PORTA, 5		; Apagamos display    
+    BCF	    PORTA, 6		; Apagamos display 
+    BCF	    PORTA, 7		; Apagamos display 
+    
+    
+    BTFSC   banderas, 0		; Verificamos bandera
+    GOTO    DISPLAY1	
+    BTFSC   banderas, 1		; Verificamos bandera
+    GOTO    DISPLAY2
+    BTFSC   banderas, 2		; Verificamos bandera
+    GOTO    DISPLAY3
+    BTFSC   banderas, 3		; Verificamos bandera
+    GOTO    DISPLAY4
+    
+   DISPLAY1:
+    CLRF PORTC
+    BSF PORTA, 7
+    BCF PORTA, 6
+    BCF PORTA, 4
+    BCF PORTA, 5
+    MOVF DIS3, 0
+    CALL TABLA_DIS
+    MOVWF PORTC
+    BCF	banderas, 0	; Cambiamos bandera para cambiar el otro display en la siguiente interrupci?n
+    BSF	banderas, 1	
+    RETURN
+    
+   DISPLAY2:
+    CLRF PORTC
+    BSF PORTA, 6
+    BCF PORTA, 7
+    BCF PORTA, 4
+    BCF PORTA, 5
+    MOVF DIS4, 0
+    CALL TABLA_DIS
+    MOVWF PORTC
+    BCF	banderas, 1	; Cambiamos bandera para cambiar el otro display en la siguiente interrupci?n
+    BSF	banderas, 2	
+    RETURN
+   
+   DISPLAY3:
+    CLRF PORTC
+    BSF PORTA, 4 
+    BCF PORTA, 7
+    BCF PORTA, 5
+    BCF PORTA, 6
+    MOVF DIS1, 0
+    CALL TABLA_DIS
+    MOVWF PORTC
+    BCF	banderas, 2	; Cambiamos bandera para cambiar el otro display en la siguiente interrupci?n
+    BSF	banderas, 3
+    RETURN
+   
+   DISPLAY4:
+    CLRF PORTC
+    BSF PORTA, 5 
+    BCF PORTA, 7
+    BCF PORTA, 4
+    BCF PORTA, 6
+    MOVF DIS2, 0
+    CALL TABLA_DIS
+    MOVWF PORTC
+    BCF	banderas, 3	; Cambiamos bandera para cambiar el otro display en la siguiente interrupci?n
+    BSF	banderas, 0
+    RETURN
+    
+    INTERMITENTES: ;SUBRUTINA QUE ENCIENDE Y APAGA LAS LUCES INTERMITENTES
+    BTFSC LUCES, 1
+    GOTO APAGAR
+    BSF PORTB, 2
+    RETURN
+   APAGAR:
+    BCF PORTB, 2
+    RETURN
+;----------------------------SUBRUTINAS SECUNDARIAS------------------------------
+    
+MINUTOS_A_DISP:
+    MOVF mins, W       
+    MOVWF mins+1
+    CLRF MIN_U
+    CLRF MIN_D
+    CALL DM	    ; se obtienen las decenas
+    MOVLW 10                ; se suma 10 a la variable minutos+1
+    ADDWF mins+1, F
+    CALL UM   ; se obtienen las unidades
+    RETURN
+
+HORAS_A_DISP:
+    MOVF horas, W
+    MOVWF horas+1
+    CLRF HORA_U
+    CLRF HORA_D
+    CALL DH
+    MOVLW 10
+    ADDWF horas+1, F
+    CALL UH
+    RETURN
+    
+;=====================LOS DE ABAJO MODIFICAN LAS VARIABLES==================
+DM:  
+    MOVLW 10
+    SUBWF mins+1, W 
+    MOVWF mins+1
+    BANKSEL STATUS
+    BTFSS STATUS, 0
+    RETURN        
+    INCF MIN_D, F   
+    GOTO DM
+UM:
+    MOVF mins+1, W     
+    MOVWF MIN_U
+    RETURN 
+    
+DH:  
+    MOVLW 10
+    SUBWF horas+1, W 
+    MOVWF horas+1
+    BANKSEL STATUS
+    BTFSS STATUS, 0
+    RETURN        
+    INCF HORA_D, F   
+    GOTO DH
+UH:
+    MOVF horas+1, W     
+    MOVWF HORA_U
+    RETURN 
+    
+  SUMA_H:
+    CALL CHECK1
+    COMPARADOR HORA_U, 10
+    CLRF HORA_U
+    INCF HORA_D
+   RETURN
+   
+  SUMA_M:
+    COMPARADOR MIN_U, 10
+    CLRF MIN_U
+    INCF MIN_D
+    COMPARADOR MIN_D, 6
+    CLRF MIN_D
+   RETURN
+   
+   RES_H:
+    CALL CHECK2
+    COMPARADOR HORA_U, 0
+    MOVLW   9
+    MOVWF   HORA_U
+    DECF    HORA_D
+   RETURN
+   
+  RES_M:
+    COMPARADOR MIN_U, 0
+    MOVLW   9
+    MOVWF   MIN_U
+    DECF MIN_D
+    COMPARADOR MIN_D, 0
+    MOVLW 5
+    MOVWF MIN_D
+   RETURN
+   
+   CHECK1:
+    COMPARADOR HORA_U, 4
+    COMPARADOR HORA_D, 2
+    CLRF HORA_U
+    CLRF HORA_D
+   RETURN
+   
+   CHECK2:
+    COMPARADOR HORA_U, 0
+    COMPARADOR HORA_D, 0
+    MOVLW   3
+    MOVWF HORA_U
+    MOVLW   2
+    MOVWF HORA_D
+   RETURN
+  
+;-------------------------------------------------------------------------------
+
+ORG 200h
+TABLA_DIS:
+    CLRF    PCLATH		; Limpiamos registro PCLATH
+    BSF	    PCLATH, 1		; Posicionamos el PC en direcci?n 02xxh
+    ANDLW   0x0F		; no saltar m?s del tama?o de la tabla
+    ADDWF   PCL
+    ;TABLA CIRCUITO FISICO
+    RETLW   11101110B	;0
+    RETLW   01000010B	;1
+    RETLW   01011000B	;2
+    RETLW   01010110B	;3
+    RETLW   01110010B	;4
+    RETLW   00110110B	;5
+    RETLW   00111110B	;6
+    RETLW   01000010B	;7
+    RETLW   01111110B	;8
+    RETLW   01110110B	;9
+    ;TABLA PROTEUS
+   /* RETLW   00111111B	;0
+    RETLW   00000110B	;1
+    RETLW   01011011B	;2
+    RETLW   01001111B	;3
+    RETLW   01100110B	;4
+    RETLW   01101101B	;5
+    RETLW   01111101B	;6
+    RETLW   00000111B	;7
+    RETLW   01111111B	;8
+    RETLW   01101111B	;9*/
+    
+; ----------------------subrutinas de config---------------------------
 	
 CONFIG_IO:
     BANKSEL ANSEL
@@ -187,32 +492,32 @@ CONFIG_IO:
     CLRF    ANSELH		; I/O digitales
     
     BANKSEL TRISA
-    BCF	    TRISA, 0
-    BCF	    TRISA, 1
+    CLRF    TRISA
     CLRF    TRISC		; PORTC como salida
-    BCF	    TRISD, 0		; RD0 como salida / D0
-    BCF	    TRISD, 1		; RD1 como salida / D1
-    BCF	    TRISD, 2		; RD3 como salida / D2
-    BCF	    TRISD, 3		; RD4 como salida / D3
-    BSF	    PORTB, 0		; PORTB0 como entrada 
-    BSF	    PORTB, 1		; PORTB1 como entrada 
-    BSF	    PORTB, 2		; PORTB2 como entrada 
-    BSF	    PORTB, 3		; PORTB2 como entrada 
+    BCF	    TRISD, 0		; LED CONFIG
+    BCF	    TRISD, 1		; LED ALARMA
+    BSF	    PORTB, 7		; BOTON ESTADO
+    BSF	    PORTB, 6		; BOTON INC 
+    BSF	    PORTB, 5		; BOTON DEC 
+    BSF	    PORTB, 4		; BOTON	MOD H/M D/M
+    BSF	    PORTB, 3		; BOTON START/STOP 
+    BCF	    PORTB, 2
     
     BANKSEL OPTION_REG
     BCF	    OPTION_REG, 7	; PORTB Pull-up habilitado
 
     BANKSEL WPUB
-    BSF	    WPUB, 0		; PORTB0 habilitado como Pull-up
-    BSF	    WPUB, 1		; PORTB1 habilitado como Pull-up
-    BSF	    WPUB, 2		; PORTB2 habilitado como Pull-up
-    BSF	    WPUB, 3		; PORTB2 habilitado como Pull-up
+    BSF	    WPUB, 7		; PORTB habilitado como Pull-up
+    BSF	    WPUB, 6
+    BSF	    WPUB, 5
+    BSF	    WPUB, 4
+    BSF	    WPUB, 3
     
     BANKSEL PORTA
     CLRF    PORTA		;Limpieza de puertos
     CLRF    PORTC
-    CLRF    PORTD
     CLRF    PORTB
+    CLRF    PORTD
     
     RETURN
     
@@ -228,351 +533,100 @@ CONFIG_TMR0:
     BANKSEL OPTION_REG	; Cambiamos de banco
     BCF T0CS		; TMR0 como temporizador
     BCF PSA		; Prescaler a TMR0
-    BSF PS2
-    BSF PS1
-    BSF PS0		; PS<2:0> -> 111 PRESCALER 1 : 256
+    BCF PS2
+    BCF PS1
+    BCF PS0		; PS<2:0> -> 000 PRESCALER 1 : 2
+
+   BANKSEL TMR0	; Cambiamos de banco
+    MOVLW 131
+    MOVWF TMR0		; 2ms retardo
+    BCF T0IF		; Limpiamos bandera de interrupci?n
+    RETURN
     
     BANKSEL TMR0	; Cambiamos de banco
     MOVLW 255
     MOVWF TMR0		; 2ms retardo
-    BCF T0IF		; Limpiamos bandera de interrupción
+    BCF T0IF		; Limpiamos bandera de interrupci?n
     RETURN
     
-CONFIG_IOCB:
-    BANKSEL TRISA
-    BSF	    IOCB, 0		; Interrupción habilitada en PORTB0
-    BSF	    IOCB, 1		; Interrupción habilitada en PORTB1
-    BSF	    IOCB, 2		; Interrupción habilitada en PORTB2
-    BSF	    IOCB, 3		; Interrupción habilitada en PORTB2
-
-    BANKSEL PORTB
-    MOVF    PORTB, W	        ; Al leer, deja de hacer mismatch
-    BCF	    RBIF		; Limpiamos bandera de interrupción
+CONFIG_TMR1:
+   BANKSEL T1CON	    ; Cambiamos a banco 00
+   BCF	    TMR1CS	    ; Reloj interno
+   BCF	    T1OSCEN	    ; Apagamos LP
+   BCF T1CON, 5
+   BSF T1CON, 4		    ;PRESCALER 2
+   
+   BCF	    TMR1GE	    ; TMR1 siempre contando
+   BSF	    TMR1ON	    ; Encendemos TMR1
+   
+   MOVLW 00001011B
+   MOVWF TMR1H 
+   MOVLW 11011100B
+   MOVWF TMR1L         ;1 SEGUNDO
+   RETURN
+   
+CONFIG_TMR2:
+   BANKSEL PR2		    ; Cambiamos a banco 01
+    MOVLW   122		    ; Valor para interrupciones cada 500ms
+    MOVWF   PR2		    ; Cargamos literal a PR2
+    
+    BANKSEL T2CON	    ; Cambiamos a banco 00
+    BSF	    T2CKPS1	    ; Prescaler 1:16
+    BSF	    T2CKPS0
+    
+    BSF	    TOUTPS3	    ;Postscaler 1:16
+    BSF	    TOUTPS2
+    BSF	    TOUTPS1
+    BSF	    TOUTPS0
+    
+    BSF	    TMR2ON	    ; Encendemos TMR2
     RETURN
- 
+   
+   RETURN
+    
     
 CONFIG_INT:
-    BANKSEL INTCON
+    BANKSEL PIE1	    ; Cambiamos a banco 01
+    BSF	    TMR1IE	    ; Habilitamos int. TMR1
+    BSF	    TMR2IE	    ; Habilitamos int. TMR2
+    
+    BANKSEL INTCON	    ; Cambiamos a banco 00
     BSF	    PEIE	    ; Habilitamos int. perifericos
-    BSF	    GIE		    ; Habilitamos interrupciones
+    BSF	    GIE		    ; Habilitamos int. globales
     BSF	    T0IE	    ; Habilitamos interrupcion TMR0
     BCF	    T0IF	    ; Limpiamos bandera de TMR0
-    BSF	    RBIE	    ; Habilitamos interrupcion RBIE
-    BCF	    RBIF	    ; Limpia bandera RBIF
-    RETURN
-   
-COUNTER_CONFIG: 
-    BSF	    PORTA, 0
-    CALL    TENSHRS
-    CALL    UNITSHRS
-    CALL    TENSMINS
-    CALL    UNITSMINS
-    RETURN 
+    BCF	    TMR1IF	    ; Limpiamos bandera de TMR1
+    BCF	    TMR2IF	    ; Limpiamos bandera de TMR2
     
-TENSHRS:
-    CLRF    horas2
-    MOVLW   4		    ;10
-    SUBWF   horas1, F		
-    BTFSS   STATUS, 0		; Skip if carry
-    GOTO    $+3
-    INCF    horas2		; Incrementamos contador de centenas
-    GOTO    $-5
-    RETURN
-
-UNITSHRS:
-    CLRF    horas1
-    MOVLW   60
-    SUBWF   cantidad, F
-    BTFSS   STATUS, 0		; Skip if carry
-    GOTO    $+3
-    INCF    horas1		; Incrementamos contador de decenas
-    GOTO    $-5
-    RETURN
-
-TENSMINS:
-    MOVLW   60	
-    ADDWF   cantidad, F		; Sumar 100 al contador en decimales
-    CLRF    minutos2
-    MOVLW   10
-    SUBWF   cantidad, F
-    BTFSS   STATUS, 0		; Skip if carry
-    GOTO    $+3
-    INCF    minutos2		; Incrementamos contador de decenas
-    GOTO    $-5
+    BANKSEL IOCB
+    BSF IOCB7
+    BSF IOCB6
+    BSF IOCB5
+    BSF IOCB4
+    BSF IOCB3
     RETURN
     
-UNITSMINS:
-    MOVLW   10
-    ADDWF   cantidad, F		; Sumar 10 al contador en decimales
-    CLRF    minutos1
-    MOVF    cantidad, W
-    MOVWF   minutos1		; Guardar valor en registro
-    RETURN
-    
-    
-    /*COUNTER_CONFIG: 
-    CALL    TENSHRS
-    CALL    UNITSHRS
-    CALL    TENSMINS
-    CALL    UNITSMINS
-    MOVF    hh1, W
-    ADDWF   horas1
-    RETURN 
-    
-    
-TENSHRS:
-    CLRF    horas2
-    MOVLW   10		    ;10
-    SUBWF   horas1, F
-    BTFSS   STATUS, 0
-    GOTO    $+4
-    INCF    horas2		; Guardar valor en registro
-    CLRF    horas1
-    GOTO    $-6
-    RETURN
-
-UNITSHRS:
-    CLRF    horas1
-    MOVLW   60
-    SUBWF   cantidad, F
-    BTFSS   STATUS, 0		; Skip if carry
-    GOTO    $+5
-    INCF    horas1		; Incrementamos contador de decenas
-    MOVF    horas1, W
-    ADDWF   hh1
-    CLRF    valor
-    RETURN
-
-TENSMINS:
-    MOVLW   60
-    ADDWF   cantidad
-    CLRF    minutos2
-    MOVLW   10
-    SUBWF   cantidad, F
-    BTFSS   STATUS, 0		; Skip if carry
-    GOTO    $+3
-    INCF    minutos2		; Incrementamos contador de decenas
-    GOTO    $-5
-    RETURN
-    
-UNITSMINS:
-    MOVLW   10
-    ADDWF   cantidad, F		; Sumar 10 al contador en decimales
-    CLRF    minutos1
-    MOVF    cantidad, W
-    MOVWF   minutos1		; Guardar valor en registro
-    RETURN
-    */
-    
-    /*
-    
-    MOVF    valor, W
-    MOVWF   minutos1
-    MOVLW   10		;10
-    SUBWF   valor, W
-    BTFSS   STATUS, 2
-    GOTO    $+17
-    INCF    minutos2
-    CLRF    minutos1
-    CLRF    valor
-    MOVLW   6 ;6
-    SUBWF   minutos2, W
-    BTFSS   STATUS, 2
-    GOTO    $+10
-    INCF    horas1
-    CLRF    minutos2
-    CALL    CHECKTF
-    MOVLW   10
-    SUBWF   horas1, W
-    BTFSS   STATUS, 2
-    GOTO    $+3
-    INCF    horas2
-    CLRF    horas1
-    RETURN
-    
-CHECKTF:
-    MOVLW   2	;2
-    SUBWF   horas2, W
-    BTFSS   STATUS, 2
-    RETURN
-    MOVLW   4
-    SUBWF   horas1, W
-    BTFSS   STATUS, 2
-    RETURN
-    CLRF    minutos1		
-    CLRF    minutos2		
-    CLRF    horas1
-    CLRF    horas2
-    RETURN
-    
-     */
-    ;-------------------------------------------------------------------
-    
-COUNTER:   
-    INCF    msegundos
-    MOVLW   100 ;500
-    XORWF   msegundos, W
-    BTFSS   STATUS, 2
-    RETURN
-    INCF    segundos
-    MOVLW   2	;60
-    XORWF   segundos, W
-    BTFSC   STATUS, 2
-    CALL    COUNTERM1
-    BTFSC   STATUS, 2		; Si se activa la bandera Z -- Después de 10s
-    CALL    COUNTERM2
-    BTFSC   STATUS, 2		; Si se activa la bandera Z -- Después de 10s
-    CALL    COUNTERM3
-    BTFSC   STATUS, 2		; Si se activa la bandera Z -- Después de 10s
-    CALL    COUNTERM4
-    
-    CLRF    STATUS		; Limpiamos bandera STATUS
-    CLRF    msegundos
-    RETURN
-    
-    COUNTERM1:
-    RESET_TMR0 255		; Reinicio de TMR0
-    CLRF    segundos		; Limpiamos contador interno de display 1
-    
-    INCF    minutos1		; Incremento del contador de display 2
-    MOVLW   10		;10
-    XORWF   minutos1, W
-    RETURN  
-    
-    COUNTERM2:
-    RESET_TMR0 255		; Reinicio de TMR0
-    CLRF    minutos1		; Limpiamos contador interno de display 1
-    
-    INCF    minutos2		; Incremento del contador de display 2
-    MOVLW   6			;6
-    XORWF   minutos2, W
-    RETURN  
-    
-    COUNTERM3:
-    RESET_TMR0 255		; Reinicio de TMR0
-    CLRF    minutos2		; Limpiamos contador interno de display 1
-    
-    MOVLW   2 ;2
-    XORWF   horas2, W
-    BTFSS   STATUS, 2 
-    GOTO    $+5
-    MOVLW   3 ;3
-    XORWF   horas1, W
-    BTFSC   STATUS, 2
-    GOTO    RESETCNTS
-    
-    INCF    horas1		; Incremento del contador de display 2
-    MOVLW   10		;10
-    XORWF   horas1, W
-    RETURN  
-    
-    COUNTERM4:
-    RESET_TMR0 255		; Reinicio de TMR0
-    CLRF    horas1		; Limpiamos contador interno de display 1
-    
-    INCF    horas2		; Incremento del contador de display 2
-    RETURN
-   
-    
-RESETCNTS:
-    RESET_TMR0 255		; Reinicio de TMR0
-    CLRF    msegundos		; Limpiamos contadores de ambos displays CONT
-    CLRF    segundos		; CONT2
-    CLRF    minutos1		; COUNT
-    CLRF    minutos2		; COUNT2
-    CLRF    horas1
-    CLRF    horas2
-    CLRF    STATUS		; Limpiamos bandera STATUS
-    CLRF    msegundos
-    GOTO    COUNTER
-    
-SET_DISPLAY:  
-    MOVF    horas2, W		; 
-    CALL    TABLA_7SEG		; Buscamos valor a cargar en PORTC
-    MOVWF   H2		        ; Guardamos en decenas
-
-    MOVF    horas1, W		;
-    CALL    TABLA_7SEG		; Buscamos valor a cargar en PORTC
-    MOVWF   H1			; Guardamos en centenas
-
-    MOVF    minutos2, W		; 
-    CALL    TABLA_7SEG		; Buscamos valor a cargar en PORTC
-    MOVWF   M2			; Guardamos en decenas
-
-    MOVF    minutos1, W		;
-    CALL    TABLA_7SEG		; Buscamos valor a cargar en PORTC
-    MOVWF   M1			; Guardamos en centenas
-    RETURN
-   
-MOSTRAR_VALOR:
-    BCF	    PORTD, 0		; Apagamos display de nibble alto
-    BCF	    PORTD, 1		; Apagamos display de nibble bajo   
-    BCF	    PORTD, 2		; Apagamos display 
-    BCF	    PORTD, 3		; Apagamos display 
-    
-    BTFSC   banderas, 0		; Verificamos bandera
-    GOTO    DISPLAY_0	
-    BTFSC   banderas, 1		; Verificamos bandera
-    GOTO    DISPLAY_1
-    BTFSC   banderas, 2		; Verificamos bandera
-    GOTO    DISPLAY_2
-    BTFSC   banderas, 3		; Verificamos bandera
-    GOTO    DISPLAY_3
-    
-    DISPLAY_0:			
-	MOVF    H2, W		; Movemos display de decenas a W
-	MOVWF   PORTC		; Movemos Valor de tabla a PORTC
-	BSF	PORTD, 0	; Encendemos display 
-	BCF	banderas, 0	; Cambiamos bandera para cambiar el otro display en la siguiente interrupción
-	BSF	banderas, 1	
-    RETURN
-
-    DISPLAY_1:
-	MOVF    H1, W		; Movemos display de centenas a W
-	MOVWF   PORTC		; Movemos Valor de tabla a PORTC
-	BSF	PORTD, 1	; Encendemos display 
-	BCF	banderas, 1	; Cambiamos bandera para cambiar el otro display en la siguiente interrupción
-	BSF	banderas, 2	
-    RETURN
-    
-    DISPLAY_2:
-	MOVF    M2, W		; Movemos display de unidades a W
-	MOVWF   PORTC		; Movemos Valor de tabla a PORTC
-	BSF	PORTD, 2
-	BCF	banderas, 2	; Cambiamos bandera para cambiar el otro display en la siguiente interrupción
-	BSF	banderas, 3
-    RETURN
-    
-    DISPLAY_3:
-	MOVF    M1, W		; Movemos display de unidades a W
-	MOVWF   PORTC		; Movemos Valor de tabla a PORTC
-	BSF	PORTD, 3
-	CLRF	banderas
-    RETURN
-    
-
-ORG 200h
-TABLA_7SEG:
-    CLRF    PCLATH		; Limpiamos registro PCLATH
-    BSF	    PCLATH, 1		; Posicionamos el PC en dirección 02xxh
-    ANDLW   0x0F		; no saltar más del tamaño de la tabla
-    ADDWF   PCL
-    RETLW   00111111B	;0
-    RETLW   00000110B	;1
-    RETLW   01011011B	;2
-    RETLW   01001111B	;3
-    RETLW   01100110B	;4
-    RETLW   01101101B	;5
-    RETLW   01111101B	;6
-    RETLW   00000111B	;7
-    RETLW   01111111B	;8
-    RETLW   01101111B	;9
-    RETLW   00111111B	;0
-    RETLW   00000110B	;1
-    RETLW   01011011B	;2
-    RETLW   01001111B	;3
-    RETLW   01100110B	;4
-    RETLW   01101101B	;5
+LIMPIAR:
+   BCF STATUS, 6
+   BCF STATUS, 5 ;BANCO 0
+   CLRF PORTA
+   CLRF PORTC
+   CLRF PORTB
+   CLRF SEGS
+   CLRF MIN_U
+   CLRF MIN_D
+   CLRF HORA_U
+   CLRF HORA_D
+   CLRF DIS1
+   CLRF DIS2
+   CLRF DIS3
+   CLRF DIS4
+   CLRF FLAGS
+   CLRF EXTRA
+   BCF T0IF ;BANDERA TMR0
+   BCF TMR1IF ;BANDERA TMR1
+   BCF TMR1IF ;BANDERA TMR2
+   RETURN
     
 END
     
